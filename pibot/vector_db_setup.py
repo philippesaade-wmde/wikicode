@@ -2,7 +2,6 @@
 
 import mysql.connector
 import pywikibot
-import requests
 from database_login import (
 	database_database,
 	database_host,
@@ -10,96 +9,10 @@ from database_login import (
 	database_user,
 )
 from pywikibot.exceptions import NoPageError
-from vector_db_functions import (
-	get_query_text,
-	get_similarity_scores,
-	vector_search,
-)
+from vector_db_functions import process_vector_data
 
 BATCH_SIZE = 100
 PRINT_EVERY = 200
-
-def process_page(mydb, mycursor, page, title, language):
-	'''Process a single Wikipedia page to calculate similarity scores and perform vector search.'''
-
-	success = True
-	try:
-		query_text = get_query_text(page)
-	except requests.RequestException:
-		return False
-
-	# Calculate similarity scores between the Wikipedia article and the Wikidata items.
-	mycursor.execute(
-		"SELECT 1 FROM newarticles WHERE candidate = %s AND site = %s "
-		"AND done = 0 AND similarity_score IS NULL LIMIT 1",
-		(title, language),
-	)
-	if mycursor.fetchone():
-		mycursor.execute(
-			"SELECT DISTINCT qid FROM newarticles "
-			"WHERE candidate = %s AND site = %s AND done = 0 "
-			"AND similarity_score IS NULL",
-			(title, language),
-		)
-		qids = [row[0] for row in mycursor.fetchall()]
-		try:
-			scores = get_similarity_scores(page, qids, text=query_text)
-		except requests.RequestException:
-			success = False
-		else:
-			for qid, score in scores.items():
-				mycursor.execute(
-					"UPDATE newarticles SET similarity_score = %s "
-					"WHERE qid = %s AND candidate = %s AND site = %s",
-					(score, qid, title, language),
-				)
-			mydb.commit()
-
-	# Perform vector search on the Wikipedia article.
-	mycursor.execute(
-		"SELECT 1 FROM newarticles WHERE candidate = %s AND site = %s "
-		"AND `source` IN (2, 3) LIMIT 1",
-		(title, language),
-	)
-	if not mycursor.fetchone():
-		try:
-			vector_results = vector_search(page, text=query_text)
-		except requests.RequestException:
-			success = False
-		else:
-			if vector_results:
-				vector_result = vector_results[0]
-				vector_qid = vector_result["QID"]
-				vector_score = vector_result["similarity_score"]
-				mycursor.execute(
-					"SELECT 1 FROM newarticles "
-					"WHERE qid = %s AND candidate = %s AND site = %s LIMIT 1",
-					(vector_qid, title, language),
-				)
-				if mycursor.fetchone():
-					mycursor.execute(
-						"UPDATE newarticles SET `source` = `source` | 2, "
-						"similarity_score = %s "
-						"WHERE qid = %s AND candidate = %s AND site = %s",
-						(vector_score, vector_qid, title, language),
-					)
-					# Reopen candidates that Pi bot previously closed automatically.
-					mycursor.execute(
-						"UPDATE newarticles SET done = 0, decision = 0 "
-						"WHERE qid = %s AND candidate = %s AND site = %s "
-						"AND done = 1 AND decision = 1 AND user = %s",
-						(vector_qid, title, language, "NA"),
-					)
-				else:
-					mycursor.execute(
-						"INSERT INTO newarticles "
-						"(qid, candidate, site, `source`, similarity_score) "
-						"VALUES (%s, %s, %s, 2, %s)",
-						(vector_qid, title, language, vector_score),
-					)
-				mydb.commit()
-
-	return success
 
 
 def main():
@@ -183,7 +96,7 @@ def main():
 				continue
 
 			count += 1
-			success = process_page(
+			success = process_vector_data(
 				mydb,
 				mycursor,
 				page,
