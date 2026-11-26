@@ -19,6 +19,7 @@ from ftplogin import *
 from database_login import *
 import mysql.connector
 from pibot_functions import *
+from vector_db_functions import process_vector_data
 
 mydb = mysql.connector.connect(
   host=database_host,
@@ -264,6 +265,7 @@ for prefix in wikipedias:
 					except:
 						print('Something went wrong when adding it to the database!')
 			if lastedited_time < days_since_last_edit_but_search:
+				process_vector_data(mydb, mycursor, page, page.title(), prefix)
 				print('Recently edited with search results ('+str(lastedited_time)+')')
 				continue
 		if prefix != 'en':
@@ -299,9 +301,11 @@ for prefix in wikipedias:
 						except:
 							print('Something went wrong when adding it to the database!')
 				if lastedited_time < days_since_last_edit_but_search:
+					process_vector_data(mydb, mycursor, page, page.title(), prefix)
 					print('Recently edited with search results ('+str(lastedited_time)+')')
 					continue
 
+		process_vector_data(mydb, mycursor, page, page.title(), prefix)
 		# ... and we're done.
 	# except:
 	# 	continue

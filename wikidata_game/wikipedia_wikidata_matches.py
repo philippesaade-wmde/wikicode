@@ -107,24 +107,37 @@ elif action == 'tiles':
 		if torun == 'any':
 			placeholders = ','.join(['%s'] * len(wikis))
 			sql = (
-				'SELECT * FROM newarticles '
+				'SELECT candidate, site FROM newarticles '
 				'WHERE done = 0 AND site IN (' + placeholders + ') '
 				'ORDER BY RAND() LIMIT 1'
 			)
 			params = tuple(wikis)
 		else:
 			sql = (
-				'SELECT * FROM newarticles '
+				'SELECT candidate, site FROM newarticles '
 				'WHERE done = 0 AND site = %s '
 				'ORDER BY RAND() LIMIT 1'
 			)
 			params = (torun,)
 
 		mycursor.execute(sql, params)
-		myresult = mycursor.fetchone()
+		page_result = mycursor.fetchone()
 
-		if myresult is None:
+		if page_result is None:
 			break
+
+		# Show the highest-scoring open candidate for the selected page.
+		mycursor.execute(
+			'SELECT * FROM newarticles '
+			'WHERE done = 0 AND candidate = %s AND site = %s '
+			'ORDER BY similarity_score IS NULL, similarity_score DESC, cid '
+			'LIMIT 1',
+			page_result,
+		)
+		myresult = mycursor.fetchone()
+		if myresult is None:
+			# No open candidates for this page, so skip to the next one.
+			continue
 
 		wiki = myresult[3]
 
@@ -194,7 +207,7 @@ elif action == 'tiles':
 			print(myresult)
 			print('Has sitelink')
 			exit()
-			
+
 		skip = 0
 		try:
 			sitelink = candidate_item_dict['sitelinks'][myresult[3]+'wiki']
@@ -205,6 +218,9 @@ elif action == 'tiles':
 			i += 1
 			if i >= int(num):
 				finished = 1
+
+	# Remove duplicate tiles by ID.
+	tiles = list({tile['id']: tile for tile in tiles}.values())
 	# print(json.dumps({"tiles":tiles}))
 	print(callback + " ( " + json.dumps(tiles) + ")\n")
 elif action == 'log_action':

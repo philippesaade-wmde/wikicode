@@ -1,6 +1,7 @@
 """Reusable Wikipedia and Wikidata Vector Database functions."""
 
 import time
+from urllib.parse import quote_plus
 
 import requests
 
@@ -11,12 +12,15 @@ USER_AGENT = (
 	"(https://www.wikidata.org/wiki/User:Pi_bot)"
 )
 MAX_ATTEMPTS = 3
+MAX_ENCODED_QUERY_LENGTH = 4000
+CATEGORY_CLASS = "Q59541917"
+DISAMBIGUATION_CLASS = "Q4167410"
 
 
-def _get_with_retry(url, params):
-	"""Retry rate limits and temporary request failures three times."""
+def _get_with_retry(url, params, max_attempts=MAX_ATTEMPTS):
+	"""Retry request failures up to the specified number of attempts."""
 	attempt = 0
-	while attempt < MAX_ATTEMPTS:
+	while attempt < max_attempts:
 		attempt += 1
 		try:
 			response = requests.get(
@@ -27,7 +31,7 @@ def _get_with_retry(url, params):
 			response.raise_for_status()
 			return response
 		except requests.RequestException as e:
-			if attempt >= MAX_ATTEMPTS:
+			if attempt >= max_attempts:
 				raise
 
 			delay = (
@@ -41,38 +45,42 @@ def _get_with_retry(url, params):
 def get_query_text(page, text=None):
 	"""Return supplied text or retrieve the page's plain-text introduction."""
 	if text and text.strip():
-		return text.strip()
+		query_text = text.strip()
+	else:
+		language = page.site.code
+		page_title = page.title()
+		url = f"https://{language}.wikipedia.org/w/api.php"
 
-	language = page.site.code
-	page_title = page.title()
-	url = f"https://{language}.wikipedia.org/w/api.php"
+		response = _get_with_retry(
+			url,
+			{
+				"action": "query",
+				"format": "json",
+				"formatversion": 2,
+				"prop": "extracts",
+				"exintro": 1,
+				"explaintext": 1,
+				"titles": page_title,
+			},
+		)
+		data = response.json()
 
-	response = _get_with_retry(
-		url,
-		{
-			"action": "query",
-			"format": "json",
-			"formatversion": 2,
-			"prop": "extracts",
-			"exintro": 1,
-			"explaintext": 1,
-			"titles": page_title,
-		},
-	)
-	data = response.json()
+		pages = data.get("query", {}).get("pages", [])
+		query_text = pages[0].get("extract", "").strip() if pages else ""
+		if not query_text:
+			query_text = page_title
 
-	pages = data.get("query", {}).get("pages", [])
-	if pages:
-		extract = pages[0].get("extract", "").strip()
-		if extract:
-			return extract
+	encoded_length = 0
+	for index, character in enumerate(query_text):
+		encoded_length += len(quote_plus(character))
+		if encoded_length > MAX_ENCODED_QUERY_LENGTH:
+			return query_text[:index].rstrip()
 
-	# Fallback to the page title if no extract is found
-	return page_title
+	return query_text
 
 
-def filter_candidates_by_sitelink(page, candidates):
-	"""Remove candidates already linked to the investigated Wikipedia."""
+def filter_candidates(page, candidates, instanceof=None):
+	"""Remove candidates with a same-language sitelink or wrong class."""
 	if not candidates:
 		return []
 
@@ -85,7 +93,7 @@ def filter_candidates_by_sitelink(page, candidates):
 			"action": "wbgetentities",
 			"format": "json",
 			"ids": "|".join(candidate["QID"] for candidate in candidates),
-			"props": "sitelinks",
+			"props": "sitelinks|claims" if instanceof else "sitelinks",
 			"sitefilter": wiki_site,
 		},
 	)
@@ -99,6 +107,17 @@ def filter_candidates_by_sitelink(page, candidates):
 		if not entity or not isinstance(entity, dict):
 			continue
 		if wiki_site not in entity.get("sitelinks", {}):
+			if instanceof:
+				claims = entity.get("claims", {}).get("P31", [])
+				instance_qids = {
+					claim.get("mainsnak", {})
+					.get("datavalue", {})
+					.get("value", {})
+					.get("id")
+					for claim in claims
+				}
+				if instanceof not in instance_qids:
+					continue
 			filtered_candidates.append(candidate)
 	return filtered_candidates
 
@@ -107,21 +126,33 @@ def vector_search(page, text=None):
 	"""Search VectorDB and exclude candidates with a same-language sitelink."""
 	query_text = get_query_text(page, text)
 	url = VECTORDB_URL + "/item/query/"
+	params = {
+		"query": query_text,
+		"lang": "all",
+		"K": 50,
+		"rerank": False,
+		"scope": "all",
+	}
 
-	response = _get_with_retry(
-		url,
-		{
-			"query": query_text,
-			"lang": "all",
-			"K": 50,
-			"rerank": False,
-			"scope": "all",
-		},
-	)
+	instanceof = None
+	if page.namespace() == 14:
+		instanceof = CATEGORY_CLASS
+	elif page.isDisambig():
+		instanceof = DISAMBIGUATION_CLASS
+
+	if instanceof:
+		params["instanceof"] = instanceof
+		try:
+			response = _get_with_retry(url, params, max_attempts=1)
+		except requests.RequestException:
+			params.pop("instanceof")
+			response = _get_with_retry(url, params)
+	else:
+		response = _get_with_retry(url, params)
 	data = response.json()
 
 	data.sort(key=lambda result: result["similarity_score"], reverse=True)
-	return filter_candidates_by_sitelink(page, data)
+	return filter_candidates(page, data, instanceof)
 
 
 def get_similarity_scores(page, qids, text=None):
@@ -186,7 +217,7 @@ def process_vector_data(mydb, mycursor, page, title, language):
 				)
 			mydb.commit()
 
-	# Add the best eligible vector search result.
+	# Add the top 1 vector search result.
 	mycursor.execute(
 		"SELECT 1 FROM newarticles WHERE candidate = %s AND site = %s "
 		"AND `source` IN (2, 3) LIMIT 1",

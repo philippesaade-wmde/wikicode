@@ -18,6 +18,7 @@ from ftplogin import *
 from database_login import *
 import mysql.connector
 from pibot_functions import *
+from vector_db_functions import process_vector_data
 
 mydb = mysql.connector.connect(
   host=database_host,
@@ -280,6 +281,7 @@ for prefix in wikipedias:
 					except:
 						print('Something went wrong when adding it to the database!')
 			if lastedited_time < days_since_last_edit_but_search:
+				process_vector_data(mydb, mycursor, page, page.title(), prefix)
 				print('Recently edited with search results ('+str(lastedited_time)+')')
 				continue
 		print('Hi')
@@ -316,9 +318,13 @@ for prefix in wikipedias:
 						except:
 							print('Something went wrong when adding it to the database!')
 				if lastedited_time < days_since_last_edit_but_search:
+					process_vector_data(mydb, mycursor, page, page.title(), prefix)
 					print('Recently edited with search results ('+str(lastedited_time)+')')
 					continue
 
+		vector_success = process_vector_data(
+			mydb, mycursor, page, page.title(), prefix
+		)
 		print('Checking for uncleared database matches...')
 		try:
 			query = 'SELECT * FROM newarticles WHERE done=0 AND candidate = "' + page.title().replace('"','\"') + '" AND site = "'+prefix+'"'
@@ -332,8 +338,10 @@ for prefix in wikipedias:
 		if myresult:
 			print('We have matches in the game, skip this')
 			continue
-		else:
-			print('Check clear, onwards')
+		if not vector_success:
+			print('Vector search failed, skip item creation')
+			continue
+		print('Check clear, onwards')
 
 		# Now continue if recently created
 		if created_time < days_since_creation:
